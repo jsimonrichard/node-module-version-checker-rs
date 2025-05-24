@@ -1,207 +1,467 @@
 use clap::Parser;
 use color_eyre::eyre::{Result, eyre};
-use glob::glob;
-use log::{info, trace, warn};
+use colored::*;
+use ptree::{PrintConfig, Style, TreeItem};
 use semver::{Version, VersionReq};
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
+use std::hash::Hash;
+use std::io;
 use std::path::{Path, PathBuf};
+use tracing::{instrument, warn};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     #[arg(short, long, default_value = ".")]
     dir: String,
+
+    #[arg(long, default_value_t = usize::MAX)]
+    depth: usize,
 }
 
-/// Reads the package name and version from an installed package's package.json in the given folder
-fn get_package_details(folder: &Path) -> Option<(String, Version)> {
-    let dep_package_json = folder.join("package.json");
-    if dep_package_json.exists() {
-        let content = fs::read_to_string(&dep_package_json).ok()?;
-        let dep_json: serde_json::Value = serde_json::from_str(&content).ok()?;
-        let name = dep_json.get("name").and_then(|n| n.as_str())?.to_string();
-        let version_str = dep_json.get("version").and_then(|v| v.as_str())?;
-        let version = Version::parse(version_str).ok()?;
-        Some((name, version))
-    } else {
-        None
+#[derive(Debug, Clone)]
+enum ExtendedVersionReq {
+    SemVer(VersionReq),
+    Workspace(String),
+}
+
+impl fmt::Display for ExtendedVersionReq {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SemVer(req) => write!(f, "{}", req),
+            Self::Workspace(path) => write!(f, "workspace:{}", path),
+        }
     }
 }
 
-/// Recursively collects all packages (including scoped) from node_modules
-fn collect_node_modules_deps(node_modules_path: &Path) -> HashMap<String, Version> {
-    let mut node_modules_deps = HashMap::new();
-    let entries = match fs::read_dir(node_modules_path) {
-        Ok(e) => e,
-        Err(_) => return node_modules_deps,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
+impl ExtendedVersionReq {
+    #[instrument]
+    fn parse(version_str: &str) -> Result<Self> {
+        if version_str.starts_with("workspace:") {
+            Ok(Self::Workspace(version_str[10..].to_string()))
+        } else {
+            Ok(Self::SemVer(VersionReq::parse(version_str)?))
+        }
+    }
+
+    #[instrument]
+    fn matches(&self, version: &Version) -> bool {
+        match self {
+            Self::SemVer(version_req) => version_req.matches(version),
+            Self::Workspace(_) => true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PartialPackage {
+    name: String,
+    version: Version,
+    install_path: PathBuf,
+    dependencies: HashMap<String, ExtendedVersionReq>,
+    dev_dependencies: HashMap<String, ExtendedVersionReq>,
+    workspaces_globs: Vec<String>,
+}
+
+impl PartialPackage {
+    #[instrument]
+    fn from_folder(folder: &Path) -> Result<Self> {
+        let dep_package_json = folder.join("package.json");
+        if !dep_package_json.exists() {
+            return Err(eyre!(
+                "package.json not found at {}",
+                dep_package_json.display()
+            ));
+        }
+        let content = fs::read_to_string(&dep_package_json)?;
+        let dep_json: serde_json::Value = serde_json::from_str(&content)?;
+        let name = dep_json
+            .get("name")
+            .and_then(|n| n.as_str())
+            .ok_or(eyre!("package has no name"))?
+            .to_string();
+        let version_str = dep_json
+            .get("version")
+            .and_then(|v| v.as_str())
+            .ok_or(eyre!("package has no version"))?;
+        let version = Version::parse(version_str)?;
+        let dependencies = dep_json
+            .get("dependencies")
+            .map(deps_from_json)
+            .transpose()?
+            .unwrap_or_default();
+
+        // Only load devDependencies if the package is not in node_modules
+        let dev_dependencies = if folder.to_string_lossy().contains("node_modules") {
+            HashMap::new()
+        } else {
+            dep_json
+                .get("devDependencies")
+                .map(deps_from_json)
+                .transpose()?
+                .unwrap_or_default()
+        };
+
+        let workspaces_globs = dep_json
+            .get("workspaces")
+            .map(|w| {
+                w.as_array()
+                    .ok_or(eyre!("workspaces is not an array"))?
+                    .iter()
+                    .map(|w| {
+                        Ok(w.as_str()
+                            .ok_or(eyre!("workspace entry is not a string"))?
+                            .to_string())
+                    })
+                    .collect::<Result<Vec<String>>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        Ok(Self {
+            name,
+            version,
+            install_path: folder.to_path_buf(),
+            dependencies,
+            dev_dependencies,
+            workspaces_globs,
+        })
+    }
+
+    #[instrument]
+    fn map_from_node_modules(node_modules_path: &Path) -> Result<HashMap<String, Self>> {
+        let mut deps = HashMap::new();
+
+        if !node_modules_path.exists() {
+            return Ok(deps);
+        }
+
+        for entry in fs::read_dir(node_modules_path)?.flatten() {
+            let path = entry.path();
+
+            if !path.is_dir() {
+                continue;
+            }
+
             let dir_name = path.file_name().unwrap().to_string_lossy();
             if dir_name.starts_with('@') {
                 // Handle scoped packages
-                let scoped_entries = match fs::read_dir(&path) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
+                let scoped_entries = fs::read_dir(&path)?;
                 for scoped_entry in scoped_entries.flatten() {
                     let scoped_path = scoped_entry.path();
-                    if scoped_path.is_dir() {
-                        if let Some((name, version)) = get_package_details(&scoped_path) {
-                            node_modules_deps.insert(name, version);
-                        }
+                    if !scoped_path.is_dir() || !scoped_path.join("package.json").exists() {
+                        continue;
+                    }
+
+                    if let Ok(package) = PartialPackage::from_folder(&scoped_path) {
+                        deps.insert(package.name.clone(), package);
+                    } else {
+                        warn!(
+                            "Failed to parse package from folder: {}",
+                            scoped_path.display()
+                        );
                     }
                 }
             } else {
                 // Handle regular packages
-                if let Some((name, version)) = get_package_details(&path) {
-                    node_modules_deps.insert(name, version);
+                if !path.join("package.json").exists() {
+                    continue;
                 }
-            }
-        }
-    }
-    node_modules_deps
-}
 
-/// Merges multiple node_modules dependency maps, prioritizing earlier maps
-fn merge_node_modules_deps(deps_maps: &[&HashMap<String, Version>]) -> HashMap<String, Version> {
-    let mut merged = HashMap::new();
-    for deps in deps_maps {
-        for (name, version) in deps.to_owned() {
-            if !merged.contains_key(name) {
-                merged.insert(name.clone(), version.clone());
-            }
-        }
-    }
-    merged
-}
-
-/// Checks a package.json against a set of node_modules folders
-fn check_package_json(
-    package_json: &serde_json::Value,
-    installed_deps: &HashMap<String, Version>,
-) -> Result<bool> {
-    info!(
-        "Checking package: {}",
-        package_json
-            .get("name")
-            .expect("package has no name")
-            .as_str()
-            .expect("package name is not a string")
-    );
-
-    let mut package_deps = HashMap::new();
-    if let Some(dependencies) = package_json.get("dependencies") {
-        if let Some(map) = dependencies.as_object() {
-            for (name, version) in map {
-                if let Some(version_str) = version.as_str() {
-                    if let Ok(version_req) = VersionReq::parse(version_str) {
-                        package_deps.insert(name.clone(), version_req);
-                    }
-                }
-            }
-        }
-    }
-    if let Some(dev_dependencies) = package_json.get("devDependencies") {
-        if let Some(map) = dev_dependencies.as_object() {
-            for (name, version) in map {
-                if let Some(version_str) = version.as_str() {
-                    if let Ok(version_req) = VersionReq::parse(version_str) {
-                        package_deps.insert(name.clone(), version_req);
-                    }
-                }
-            }
-        }
-    }
-
-    if package_deps.is_empty() {
-        info!("No dependencies found in package.json");
-        return Ok(true);
-    }
-
-    let mut all_match = true;
-    for (dep, expected_version_req) in &package_deps {
-        match installed_deps.get(dep) {
-            Some(actual_version) => {
-                if !expected_version_req.matches(actual_version) {
-                    warn!(
-                        "{}: version mismatch (package.json: {}, node_modules: {})",
-                        dep, expected_version_req, actual_version
-                    );
-                    all_match = false;
+                if let Ok(package) = PartialPackage::from_folder(&path) {
+                    deps.insert(package.name.clone(), package);
                 } else {
-                    trace!(
-                        "{}: version matches (package.json: {}, node_modules: {})",
-                        dep, expected_version_req, actual_version
-                    );
+                    warn!("Failed to parse package from folder: {}", path.display());
                 }
             }
-            None => {
-                warn!("{}: Not installed in node_modules", dep);
-                all_match = false;
+        }
+
+        return Ok(deps);
+    }
+}
+
+#[instrument]
+fn deps_from_json(deps: &serde_json::Value) -> Result<HashMap<String, ExtendedVersionReq>> {
+    let mut result = HashMap::new();
+    let deps_object = deps
+        .as_object()
+        .ok_or(eyre!("dependencies is not an object"))?;
+    for (name, version) in deps_object {
+        let version_str = version.as_str().ok_or(eyre!("version is not a string"))?;
+        let version_req = ExtendedVersionReq::parse(version_str)?;
+        result.insert(name.clone(), version_req);
+    }
+    Ok(result)
+}
+
+#[derive(Debug, Clone)]
+enum ResolvedPackage {
+    Resolved(Package),
+    Deduped(PackageKey),
+    Missing(String),
+}
+
+impl fmt::Display for ResolvedPackage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self {
+            ResolvedPackage::Resolved(package) => {
+                write!(f, "{}@{}", package.name, package.version)
+            }
+            ResolvedPackage::Deduped(key) => {
+                write!(f, "{}@{} {}", key.name, key.version, "[DEDUPED]".yellow())
+            }
+            ResolvedPackage::Missing(name) => {
+                write!(f, "{} {}", name, "[MISSING]".red())
             }
         }
     }
-    Ok(all_match)
 }
 
-fn parse_package_json(package_json_path: &Path) -> Result<serde_json::Value> {
-    if !package_json_path.exists() {
-        return Err(eyre!(
-            "package.json not found at {}",
-            package_json_path.display()
-        ));
+#[derive(Debug, Clone)]
+struct ResolvedPackageWithVersionReq {
+    version_req: ExtendedVersionReq,
+    package: ResolvedPackage,
+}
+
+impl fmt::Display for ResolvedPackageWithVersionReq {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} (required: {})", self.package, self.version_req)
     }
-    let package_json_content = fs::read_to_string(package_json_path)?;
-    let package_json: serde_json::Value = serde_json::from_str(&package_json_content)?;
-    Ok(package_json)
 }
 
-fn get_workspace_members(workspaces: &serde_json::Value) -> Result<Vec<PathBuf>> {
-    let mut workspace_paths = Vec::new();
-    for workspace in workspaces
-        .as_array()
-        .ok_or(eyre!("workspaces is not an array"))?
-    {
-        let workspace_slug = workspace
-            .as_str()
-            .ok_or(eyre!("workspace entry is not a string"))?;
-        let paths = glob(workspace_slug)?;
-        for path in paths {
-            let path = path?;
-            if path.join("package.json").exists() {
-                workspace_paths.push(path);
+#[derive(Debug, Clone)]
+struct Package {
+    name: String,
+    version: Version,
+    install_path: PathBuf,
+    dependencies: HashMap<String, ResolvedPackageWithVersionReq>,
+    dev_dependencies: HashMap<String, ResolvedPackageWithVersionReq>,
+}
+
+impl fmt::Display for Package {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}@{}", self.name, self.version)
+    }
+}
+
+impl TreeItem for Package {
+    type Child = PackageTreeChild;
+
+    fn write_self<W: io::Write>(&self, f: &mut W, style: &Style) -> io::Result<()> {
+        write!(f, "{}", style.paint(self))
+    }
+
+    fn children(&self) -> Cow<[Self::Child]> {
+        let mut v: Vec<PackageTreeChild> = self
+            .dependencies
+            .values()
+            .map(|r| PackageTreeChild::Package(r.clone()))
+            .collect();
+
+        if !self.dev_dependencies.is_empty() {
+            v.push(PackageTreeChild::DevDependencySeparator);
+            v.extend(
+                self.dev_dependencies
+                    .values()
+                    .map(|r| PackageTreeChild::Package(r.clone())),
+            );
+        }
+
+        Cow::from(v)
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PackageTreeChild {
+    Package(ResolvedPackageWithVersionReq),
+    DevDependencySeparator,
+}
+
+impl fmt::Display for PackageTreeChild {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PackageTreeChild::Package(package) => write!(f, "{}", package),
+            PackageTreeChild::DevDependencySeparator => {
+                write!(f, "{}", "[DEV DEPENDENCIES]".blue())
             }
         }
     }
-    Ok(workspace_paths)
 }
 
-fn check_workspace_member(
-    workspace_path: PathBuf,
-    hoisted_deps: &HashMap<String, Version>,
-) -> Result<bool> {
-    let workspace_package_json = workspace_path.join("package.json");
-    let workspace_json = parse_package_json(&workspace_package_json)?;
-    let non_hoisted_deps = collect_node_modules_deps(&workspace_path.join("node_modules"));
-    let deps = merge_node_modules_deps(&[&non_hoisted_deps, hoisted_deps]);
-    check_package_json(&workspace_json, &deps)
+impl TreeItem for PackageTreeChild {
+    type Child = PackageTreeChild;
+
+    fn write_self<W: io::Write>(&self, f: &mut W, style: &Style) -> io::Result<()> {
+        write!(f, "{}", style.paint(self))
+    }
+
+    fn children(&self) -> Cow<[Self::Child]> {
+        if let PackageTreeChild::Package(ResolvedPackageWithVersionReq {
+            package: ResolvedPackage::Resolved(package),
+            ..
+        }) = self
+        {
+            Cow::from(package.children().to_vec())
+        } else {
+            Cow::Borrowed(&[])
+        }
+    }
 }
 
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+struct PackageKey {
+    name: String,
+    version: Version,
+}
+
+impl fmt::Display for PackageKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}@{}", self.name, self.version)
+    }
+}
+
+#[derive(Debug)]
+struct PackageResolver {
+    hoisted_partials: HashMap<String, PartialPackage>,
+    resolved_packages: HashMap<PackageKey, Package>,
+    visiting: Vec<PackageKey>,
+}
+
+impl PackageResolver {
+    fn new(hoisted_partials: HashMap<String, PartialPackage>) -> Self {
+        Self {
+            hoisted_partials,
+            resolved_packages: HashMap::new(),
+            visiting: Vec::new(),
+        }
+    }
+
+    fn extend(&self, other: HashMap<String, PartialPackage>) -> Self {
+        Self {
+            hoisted_partials: merge_hashmaps(&[&other, &self.hoisted_partials]),
+            resolved_packages: self.resolved_packages.clone(),
+            visiting: self.visiting.clone(),
+        }
+    }
+
+    #[instrument]
+    fn resolve_package(&mut self, partial: PartialPackage) -> Result<ResolvedPackage> {
+        let PartialPackage {
+            name,
+            version,
+            install_path,
+            dependencies,
+            dev_dependencies,
+            workspaces_globs: _,
+        } = partial;
+
+        let key = PackageKey {
+            name: name.clone(),
+            version: version.clone(),
+        };
+
+        if self.visiting.contains(&key) {
+            return Ok(ResolvedPackage::Deduped(key));
+        }
+
+        if let Some(package) = self.resolved_packages.get(&key) {
+            return Ok(ResolvedPackage::Resolved(package.clone()));
+        }
+
+        self.visiting.push(key.clone());
+
+        let node_modules_path = install_path.join("node_modules");
+
+        let resolved_dependencies;
+        let resolved_dev_dependencies;
+        if node_modules_path.exists() {
+            let sub_modules = PartialPackage::map_from_node_modules(&node_modules_path)?;
+            let resolver = &mut self.extend(sub_modules);
+            resolved_dependencies = resolver.resolve_deps(&dependencies)?;
+            resolved_dev_dependencies = resolver.resolve_deps(&dev_dependencies)?;
+        } else {
+            resolved_dependencies = self.resolve_deps(&dependencies)?;
+            resolved_dev_dependencies = self.resolve_deps(&dev_dependencies)?;
+        }
+
+        let package = Package {
+            name,
+            version,
+            install_path: install_path.clone(),
+            dependencies: resolved_dependencies,
+            dev_dependencies: resolved_dev_dependencies,
+        };
+        self.resolved_packages.insert(key, package.clone());
+
+        Ok(ResolvedPackage::Resolved(package))
+    }
+
+    #[instrument]
+    fn resolve_deps(
+        &mut self,
+        deps: &HashMap<String, ExtendedVersionReq>,
+    ) -> Result<HashMap<String, ResolvedPackageWithVersionReq>> {
+        let mut packages = HashMap::new();
+        for (name, version_req) in deps {
+            if let Some(partial) = self.hoisted_partials.get(name).cloned() {
+                let package = self.resolve_package(partial)?;
+
+                packages.insert(
+                    name.clone(),
+                    ResolvedPackageWithVersionReq {
+                        version_req: version_req.clone(),
+                        package,
+                    },
+                );
+            } else {
+                packages.insert(
+                    name.clone(),
+                    ResolvedPackageWithVersionReq {
+                        version_req: version_req.clone(),
+                        package: ResolvedPackage::Missing(name.clone()),
+                    },
+                );
+            }
+        }
+        Ok(packages)
+    }
+}
+
+#[instrument]
+fn merge_hashmaps<K: Hash + Eq + Clone + fmt::Debug, V: Clone + fmt::Debug>(
+    maps: &[&HashMap<K, V>],
+) -> HashMap<K, V> {
+    let mut result: HashMap<K, V> = HashMap::new();
+    for map in maps {
+        for (key, value) in map.to_owned() {
+            if !result.contains_key(key) {
+                result.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    result
+}
+
+fn install_tracing() {
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+}
+
+#[instrument]
 fn main() -> Result<()> {
     color_eyre::install()?;
-    env_logger::init();
+    install_tracing();
 
     let args = Args::parse();
     let base_dir = std::env::current_dir()
         .expect("Failed to get current directory")
         .join(&args.dir);
-    let package_json_path = base_dir.join("package.json");
     let node_modules_path = base_dir.join("node_modules");
-
-    let package_json = parse_package_json(&package_json_path)?;
 
     if !node_modules_path.exists() {
         return Err(eyre!(
@@ -209,22 +469,39 @@ fn main() -> Result<()> {
             base_dir.display()
         ));
     }
-    let node_modules_deps = collect_node_modules_deps(&node_modules_path);
+    let mut partials = PartialPackage::map_from_node_modules(&node_modules_path)?;
 
-    let mut all_match = check_package_json(&package_json, &node_modules_deps)?;
-
-    // Check workspaces if present
-    if let Some(workspaces) = package_json.get("workspaces") {
-        let workspace_paths = get_workspace_members(workspaces)?;
-        for workspace_path in workspace_paths {
-            if !check_workspace_member(workspace_path, &node_modules_deps)? {
-                all_match = false;
+    let root_partial = PartialPackage::from_folder(&base_dir)?;
+    let mut workspaces = HashMap::new();
+    for glob in &root_partial.workspaces_globs {
+        for folder in glob::glob(glob)? {
+            let workspace_path = folder?;
+            if workspace_path.join("package.json").exists() {
+                let partial = PartialPackage::from_folder(&workspace_path)?;
+                workspaces.insert(partial.name.clone(), partial);
             }
         }
     }
+    partials.extend(workspaces);
 
-    if all_match {
-        info!("All dependencies match the versions specified in package.json");
-    }
+    // Create the root package
+    let mut resolver = PackageResolver::new(partials);
+    let root_package = match resolver.resolve_package(root_partial)? {
+        ResolvedPackage::Resolved(package) => package,
+        ResolvedPackage::Deduped(_) => {
+            return Err(eyre!("Root package is deduped"));
+        }
+        ResolvedPackage::Missing(_) => {
+            return Err(eyre!("Root package is missing"));
+        }
+    };
+
+    // Display the dependency tree with depth limit
+    let config = PrintConfig {
+        depth: args.depth as u32,
+        ..Default::default()
+    };
+    ptree::print_tree_with(&root_package, &config).expect("Unable to print dependency tree");
+
     Ok(())
 }
