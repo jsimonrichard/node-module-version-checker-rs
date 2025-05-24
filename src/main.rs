@@ -21,6 +21,8 @@ struct Args {
 
     #[arg(long, default_value_t = usize::MAX)]
     depth: usize,
+
+    packages: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -415,16 +417,32 @@ impl PackageResolver {
         let mut packages = HashMap::new();
         for (name, version_req) in deps {
             if let Some(partial) = self.hoisted_partials.get(name).cloned() {
-                let package = self.resolve_package(partial)?;
+                // A version of that dependency exists
+                if let ExtendedVersionReq::Workspace(_) = version_req {
+                    // Always dedup workspace dependencies here
+                    packages.insert(
+                        name.clone(),
+                        ResolvedPackageWithVersionReq {
+                            version_req: version_req.clone(),
+                            package: ResolvedPackage::Deduped(PackageKey {
+                                name: name.clone(),
+                                version: None,
+                            }),
+                        },
+                    );
+                } else {
+                    let package = self.resolve_package(partial)?;
 
-                packages.insert(
-                    name.clone(),
-                    ResolvedPackageWithVersionReq {
-                        version_req: version_req.clone(),
-                        package,
-                    },
-                );
+                    packages.insert(
+                        name.clone(),
+                        ResolvedPackageWithVersionReq {
+                            version_req: version_req.clone(),
+                            package,
+                        },
+                    );
+                }
             } else {
+                // No version of that dependency exists
                 packages.insert(
                     name.clone(),
                     ResolvedPackageWithVersionReq {
@@ -490,26 +508,63 @@ fn main() -> Result<()> {
             }
         }
     }
-    partials.extend(workspaces);
+    partials.extend(workspaces.clone());
 
-    // Create the root package
     let mut resolver = PackageResolver::new(partials);
-    let root_package = match resolver.resolve_package(root_partial)? {
-        ResolvedPackage::Resolved(package) => package,
-        ResolvedPackage::Deduped(_) => {
-            return Err(eyre!("Root package is deduped"));
-        }
-        ResolvedPackage::Missing(_) => {
-            return Err(eyre!("Root package is missing"));
-        }
-    };
 
     // Display the dependency tree with depth limit
     let config = PrintConfig {
         depth: args.depth as u32,
         ..Default::default()
     };
-    ptree::print_tree_with(&root_package, &config).expect("Unable to print dependency tree");
+
+    if args.packages.is_empty() || args.packages.contains(&root_partial.name) {
+        // Create the root package
+        let root_package = match resolver.resolve_package(root_partial)? {
+            ResolvedPackage::Resolved(package) => package,
+            ResolvedPackage::Deduped(_) => {
+                return Err(eyre!("Root package is deduped"));
+            }
+            ResolvedPackage::Missing(_) => {
+                return Err(eyre!("Root package is missing"));
+            }
+        };
+
+        if !workspaces.is_empty() {
+            println!("{}", "[WORKSPACE ROOT]".blue());
+        }
+
+        ptree::print_tree_with(&root_package, &config).expect("Unable to print dependency tree");
+        println!("\n");
+    };
+
+    for workspace in workspaces.values() {
+        if !args.packages.is_empty() && !args.packages.contains(&workspace.name) {
+            continue;
+        }
+
+        println!(
+            "{} @ {}",
+            "[WORKSPACE]".blue(),
+            workspace
+                .install_path
+                .strip_prefix(&base_dir)
+                .unwrap_or(&workspace.install_path)
+                .display()
+        );
+        let workspace_package = match resolver.resolve_package(workspace.clone())? {
+            ResolvedPackage::Resolved(package) => package,
+            ResolvedPackage::Deduped(_) => {
+                return Err(eyre!("Workspace package is deduped"));
+            }
+            ResolvedPackage::Missing(_) => {
+                return Err(eyre!("Workspace package is missing"));
+            }
+        };
+        ptree::print_tree_with(&workspace_package, &config)
+            .expect("Unable to print dependency tree");
+        println!("\n");
+    }
 
     Ok(())
 }
