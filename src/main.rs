@@ -60,7 +60,7 @@ impl ExtendedVersionReq {
 #[derive(Debug, Clone)]
 struct PartialPackage {
     name: String,
-    version: Version,
+    version: Option<Version>,
     install_path: PathBuf,
     dependencies: HashMap<String, ExtendedVersionReq>,
     dev_dependencies: HashMap<String, ExtendedVersionReq>,
@@ -84,11 +84,11 @@ impl PartialPackage {
             .and_then(|n| n.as_str())
             .ok_or(eyre!("package has no name"))?
             .to_string();
-        let version_str = dep_json
+        let version = dep_json
             .get("version")
             .and_then(|v| v.as_str())
-            .ok_or(eyre!("package has no version"))?;
-        let version = Version::parse(version_str)?;
+            .map(|v| Version::parse(v))
+            .transpose()?;
         let dependencies = dep_json
             .get("dependencies")
             .map(deps_from_json)
@@ -208,10 +208,10 @@ impl fmt::Display for ResolvedPackage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self {
             ResolvedPackage::Resolved(package) => {
-                write!(f, "{}@{}", package.name, package.version)
+                write!(f, "{}", package)
             }
             ResolvedPackage::Deduped(key) => {
-                write!(f, "{}@{} {}", key.name, key.version, "[DEDUPED]".yellow())
+                write!(f, "{} {}", key, "[DEDUPED]".yellow())
             }
             ResolvedPackage::Missing(name) => {
                 write!(f, "{} {}", name, "[MISSING]".red())
@@ -235,7 +235,7 @@ impl fmt::Display for ResolvedPackageWithVersionReq {
 #[derive(Debug, Clone)]
 struct Package {
     name: String,
-    version: Version,
+    version: Option<Version>,
     install_path: PathBuf,
     dependencies: HashMap<String, ResolvedPackageWithVersionReq>,
     dev_dependencies: HashMap<String, ResolvedPackageWithVersionReq>,
@@ -243,7 +243,11 @@ struct Package {
 
 impl fmt::Display for Package {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}@{}", self.name, self.version)
+        if let Some(version) = &self.version {
+            write!(f, "{}@{}", self.name, version)
+        } else {
+            write!(f, "{}", self.name)
+        }
     }
 }
 
@@ -314,12 +318,16 @@ impl TreeItem for PackageTreeChild {
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct PackageKey {
     name: String,
-    version: Version,
+    version: Option<Version>,
 }
 
 impl fmt::Display for PackageKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}@{}", self.name, self.version)
+        if let Some(version) = &self.version {
+            write!(f, "{}@{}", self.name, version)
+        } else {
+            write!(f, "{}", self.name)
+        }
     }
 }
 
