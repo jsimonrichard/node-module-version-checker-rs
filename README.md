@@ -8,3 +8,5 @@ To install, run
 ```
 cargo install --path .
 ```
+
+To use, simply navigate to the root of the project and run `mvc` or use the `--dir` flag to specify the project root directory. 
