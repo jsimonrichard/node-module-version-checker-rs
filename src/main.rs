@@ -1,4 +1,5 @@
 use clap::Parser;
+use color_eyre::eyre::Context;
 use color_eyre::eyre::{Result, eyre};
 use colored::*;
 use ptree::{PrintConfig, Style, TreeItem};
@@ -29,6 +30,7 @@ struct Args {
 enum ExtendedVersionReq {
     SemVer(VersionReq),
     Workspace(String),
+    Path(PathBuf),
 }
 
 impl fmt::Display for ExtendedVersionReq {
@@ -36,6 +38,7 @@ impl fmt::Display for ExtendedVersionReq {
         match self {
             Self::SemVer(req) => write!(f, "{}", req),
             Self::Workspace(path) => write!(f, "workspace:{}", path),
+            Self::Path(path) => write!(f, "{}", path.display()),
         }
     }
 }
@@ -45,8 +48,18 @@ impl ExtendedVersionReq {
     fn parse(version_str: &str) -> Result<Self> {
         if version_str.starts_with("workspace:") {
             Ok(Self::Workspace(version_str[10..].to_string()))
+        } else if version_str.starts_with("path:") {
+            Ok(Self::Path(PathBuf::from(&version_str[5..])))
+        } else if version_str.starts_with("file:") {
+            Ok(Self::Path(PathBuf::from(&version_str[5..])))
         } else {
-            Ok(Self::SemVer(VersionReq::parse(version_str)?))
+            let path = PathBuf::from(version_str);
+            if path.exists() {
+                return Ok(Self::Path(path));
+            }
+            return Ok(Self::SemVer(VersionReq::parse(version_str).wrap_err(
+                eyre!("Failed to parse version requirement (or perhaps it's a path that doesn't exist): {}", version_str),
+            )?));
         }
     }
 
@@ -54,7 +67,7 @@ impl ExtendedVersionReq {
     fn matches(&self, version: &Version) -> bool {
         match self {
             Self::SemVer(version_req) => version_req.matches(version),
-            Self::Workspace(_) => true,
+            _ => true,
         }
     }
 }
