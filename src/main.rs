@@ -338,14 +338,18 @@ struct PackageResolver {
     hoisted_partials: HashMap<String, PartialPackage>,
     resolved_packages: HashMap<PackageKey, Package>,
     visiting: Vec<PackageKey>,
+    max_depth: usize,
+    current_depth: usize,
 }
 
 impl PackageResolver {
-    fn new(hoisted_partials: HashMap<String, PartialPackage>) -> Self {
+    fn new(hoisted_partials: HashMap<String, PartialPackage>, max_depth: usize) -> Self {
         Self {
             hoisted_partials,
             resolved_packages: HashMap::new(),
             visiting: Vec::new(),
+            max_depth,
+            current_depth: 0,
         }
     }
 
@@ -354,6 +358,8 @@ impl PackageResolver {
             hoisted_partials: merge_hashmaps(&[&other, &self.hoisted_partials]),
             resolved_packages: self.resolved_packages.clone(),
             visiting: self.visiting.clone(),
+            max_depth: self.max_depth,
+            current_depth: self.current_depth,
         }
     }
 
@@ -381,9 +387,21 @@ impl PackageResolver {
             return Ok(ResolvedPackage::Resolved(package.clone()));
         }
 
+        if self.current_depth >= self.max_depth {
+            return Ok(ResolvedPackage::Resolved(Package {
+                name,
+                version,
+                install_path: install_path.clone(),
+                dependencies: HashMap::new(),
+                dev_dependencies: HashMap::new(),
+            }));
+        }
+
         self.visiting.push(key.clone());
 
         let node_modules_path = install_path.join("node_modules");
+
+        self.current_depth += 1;
 
         let resolved_dependencies;
         let resolved_dev_dependencies;
@@ -396,6 +414,8 @@ impl PackageResolver {
             resolved_dependencies = self.resolve_deps(&dependencies)?;
             resolved_dev_dependencies = self.resolve_deps(&dev_dependencies)?;
         }
+
+        self.current_depth -= 1;
 
         let package = Package {
             name,
@@ -510,7 +530,7 @@ fn main() -> Result<()> {
     }
     partials.extend(workspaces.clone());
 
-    let mut resolver = PackageResolver::new(partials);
+    let mut resolver = PackageResolver::new(partials, args.depth);
 
     // Display the dependency tree with depth limit
     let config = PrintConfig {
