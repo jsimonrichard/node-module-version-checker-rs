@@ -1,0 +1,18 @@
+[package]
+name = "module-version-checker"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "mvc"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+semver = "1.0"
+log = "0.4.27"
+color-eyre = "0.6.4"
+glob = "0.3.2"
+env_logger = "0.11.8"
