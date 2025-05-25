@@ -1,9 +1,11 @@
 use color_eyre::eyre::{Result, eyre};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use tracing::debug;
 
 use crate::package::{PackageJsonData, PackageResolver};
 
+#[derive(Debug)]
 pub struct WorkspaceResolver {
     workspace_roots: HashMap<PathBuf, (PackageJsonData, PackageResolver)>,
     max_depth: usize,
@@ -81,10 +83,17 @@ impl WorkspaceResolver {
 
         match (immediate_resolver, root_resolver) {
             (Some(immediate_resolver), Some(root_resolver)) => {
+                debug!("Extending immediate resolver with workspace root resolver");
                 Ok(immediate_resolver.extend(&root_resolver))
             }
-            (Some(immediate_resolver), None) => Ok(immediate_resolver),
-            (None, Some(root_resolver)) => Ok(root_resolver.clone()),
+            (Some(immediate_resolver), None) => {
+                debug!("Returning immediate resolver");
+                Ok(immediate_resolver)
+            }
+            (None, Some(root_resolver)) => {
+                debug!("Returning workspace root resolver");
+                Ok(root_resolver.clone())
+            }
             (None, None) => Err(eyre!(
                 "No workspace root found for {}",
                 package_data.install_path.display()
@@ -94,20 +103,41 @@ impl WorkspaceResolver {
 }
 
 fn resolve_workspace_root(path: &Path) -> Result<Option<PackageJsonData>> {
-    let mut path_buf = path.to_path_buf();
+    let package_path = path.canonicalize()?;
+    let mut current_path = package_path.clone();
     loop {
-        let package_data_opt = PackageJsonData::from_folder(&path_buf)?;
+        let package_data_opt = PackageJsonData::from_folder(&current_path)?;
         if let Some(package_data) = package_data_opt {
-            if !package_data.workspaces_globs.is_empty() {
-                if package_data.contains_workspace(&path_buf)? {
+            debug!("Checking if {} is a workspace root", current_path.display());
+            if package_data.is_workspace_root() {
+                if package_data.contains_workspace(&package_path)? {
+                    debug!("Found workspace root: {}", current_path.display());
                     return Ok(Some(package_data));
                 }
             }
         }
 
-        if !path_buf.pop() {
+        if !current_path.pop() {
             break;
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use test_log::test;
+
+    use super::*;
+
+    #[test]
+    fn test_resolve_workspace_root() -> Result<()> {
+        let package_data = resolve_workspace_root(Path::new("tests/workspace/packages/foo"))?;
+        assert!(package_data.is_some());
+        assert!(
+            package_data.unwrap().install_path
+                == PathBuf::from("tests/workspace").canonicalize()?
+        );
+        Ok(())
+    }
 }

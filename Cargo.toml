@@ -19,3 +19,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 colored = "3.0.0"
 ptree = "0.5.2"
 globset = "0.4.16"
+test-log = { version = "0.2.17", features = ["trace"] }

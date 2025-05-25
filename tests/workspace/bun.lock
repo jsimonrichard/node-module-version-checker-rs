@@ -1,0 +1,23 @@
+{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "test-workspace-root",
+    },
+    "app": {
+      "name": "my-app",
+      "dependencies": {
+        "@workspace/foo": "workspace:*",
+      },
+    },
+    "packages/foo": {
+      "name": "@workspace/foo",
+      "version": "0.0.1",
+    },
+  },
+  "packages": {
+    "@workspace/foo": ["@workspace/foo@workspace:packages/foo"],
+
+    "my-app": ["my-app@workspace:app"],
+  }
+}

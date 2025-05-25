@@ -7,14 +7,13 @@ use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
-use tracing::{instrument, warn};
 
 use crate::extended_version_req::ExtendedVersionReq;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct PackageKey {
-    name: String,
-    version: Option<Version>, // Workspace packages may not have a version
+    pub name: String,
+    pub version: Option<Version>, // Workspace packages may not have a version
 }
 
 impl PackageKey {
@@ -50,7 +49,6 @@ pub struct PackageJsonData {
 }
 
 impl PackageJsonData {
-    #[instrument]
     /// Loads a package from a folder.
     /// Returns None if the folder is not a package.
     /// Returns an Err if the package.json is invalid.
@@ -88,6 +86,8 @@ impl PackageJsonData {
                 .unwrap_or_default()
         };
 
+        let install_path = folder.canonicalize()?;
+
         let workspaces_globs = dep_json
             .get("workspaces")
             .map(|w| {
@@ -95,9 +95,9 @@ impl PackageJsonData {
                     .ok_or(eyre!("workspaces is not an array"))?
                     .iter()
                     .map(|w| {
-                        Ok(w.as_str()
-                            .ok_or(eyre!("workspace entry is not a string"))?
-                            .to_string())
+                        Ok(install_path.to_string_lossy().to_string()
+                            + "/"
+                            + w.as_str().ok_or(eyre!("workspace entry is not a string"))?)
                     })
                     .collect::<Result<Vec<String>>>()
             })
@@ -106,7 +106,7 @@ impl PackageJsonData {
         Ok(Some(Self {
             name,
             version,
-            install_path: folder.to_path_buf(),
+            install_path,
             dependencies,
             dev_dependencies,
             workspaces_globset: if !workspaces_globs.is_empty() {
@@ -123,7 +123,11 @@ impl PackageJsonData {
     }
 
     pub fn contains_workspace(&self, path: &Path) -> Result<bool> {
-        return Ok(self.workspaces_globset.as_ref().unwrap().is_match(path));
+        return Ok(self
+            .workspaces_globset
+            .as_ref()
+            .ok_or(eyre!("This package is not a workspace root"))?
+            .is_match(&norm_for_glob(&path.to_string_lossy())));
     }
 
     pub fn get_workspaces(&self) -> Result<Vec<PackageJsonData>> {
@@ -153,12 +157,15 @@ impl PackageJsonData {
 fn build_globset_from_globs(globs: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for glob in globs {
-        builder.add(Glob::new(glob)?);
+        builder.add(Glob::new(&norm_for_glob(glob))?);
     }
     return Ok(builder.build()?);
 }
 
-#[instrument]
+fn norm_for_glob(path: &str) -> String {
+    path.trim_end_matches('/').to_string()
+}
+
 fn deps_from_json(deps: &serde_json::Value) -> Result<HashMap<String, ExtendedVersionReq>> {
     let mut result = HashMap::new();
     let deps_object = deps
@@ -166,7 +173,7 @@ fn deps_from_json(deps: &serde_json::Value) -> Result<HashMap<String, ExtendedVe
         .ok_or(eyre!("dependencies is not an object"))?;
     for (name, version) in deps_object {
         let version_str = version.as_str().ok_or(eyre!("version is not a string"))?;
-        let version_req = ExtendedVersionReq::parse(version_str)?;
+        let version_req = ExtendedVersionReq::parse(version_str);
         result.insert(name.clone(), version_req);
     }
     Ok(result)
@@ -213,7 +220,7 @@ pub enum ResolvedPackageEntry {
 }
 
 impl ResolvedPackageEntry {
-    fn satisfies(&self, version_req: &ExtendedVersionReq) -> Option<bool> {
+    pub fn satisfies(&self, version_req: &ExtendedVersionReq) -> Option<bool> {
         match self {
             Self::Full(package) => package.satisfies(version_req),
             Self::Deduped(key) => key.satisfies(version_req),
@@ -250,7 +257,7 @@ impl fmt::Display for ResolvedPackageEntry {
 pub struct ResolvedPackage {
     pub name: String,
     pub version: Option<Version>,
-    pub install_path: PathBuf,
+    // pub install_path: PathBuf,
     pub dependencies: HashMap<String, ResolvedDependency>,
     pub dev_dependencies: HashMap<String, ResolvedDependency>,
 }
@@ -265,6 +272,7 @@ impl ResolvedPackage {
         }
     }
 }
+
 impl fmt::Display for ResolvedPackage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(version) = &self.version {
@@ -279,7 +287,6 @@ impl fmt::Display for ResolvedPackage {
 pub struct PackageResolver {
     packages_data: HashMap<String, PackageJsonData>,
     resolved_packages: HashMap<PackageKey, ResolvedPackageEntry>,
-    visiting: Vec<PackageKey>,
     max_depth: usize,
     current_depth: usize,
 }
@@ -289,7 +296,6 @@ impl PackageResolver {
         Self {
             packages_data: package_data,
             resolved_packages: HashMap::new(),
-            visiting: Vec::new(),
             max_depth,
             current_depth: 0,
         }
@@ -304,13 +310,11 @@ impl PackageResolver {
         Self {
             packages_data: merge_hashmaps(&[&other.packages_data, &self.packages_data]),
             resolved_packages: self.resolved_packages.clone(),
-            visiting: [self.visiting.clone(), other.visiting.clone()].concat(),
             max_depth: self.max_depth,
             current_depth: self.current_depth,
         }
     }
 
-    #[instrument]
     pub fn resolve_package(
         &mut self,
         package_data: PackageJsonData,
@@ -330,7 +334,7 @@ impl PackageResolver {
             version: version.clone(),
         };
 
-        if self.visiting.contains(&key) {
+        if self.resolved_packages.contains_key(&key) {
             return Ok(ResolvedPackageEntry::Deduped(key));
         }
 
@@ -338,17 +342,11 @@ impl PackageResolver {
             return Ok(ResolvedPackageEntry::Full(ResolvedPackage {
                 name,
                 version,
-                install_path: install_path.clone(),
+                // install_path: install_path.clone(),
                 dependencies: HashMap::new(),
                 dev_dependencies: HashMap::new(),
             }));
         }
-
-        if let Some(package) = self.resolved_packages.get(&key) {
-            return Ok(package.clone());
-        }
-
-        self.visiting.push(key.clone());
 
         let node_modules_path = install_path.join("node_modules");
 
@@ -372,7 +370,7 @@ impl PackageResolver {
         let package = ResolvedPackageEntry::Full(ResolvedPackage {
             name,
             version,
-            install_path: install_path.clone(),
+            // install_path: install_path.clone(),
             dependencies: resolved_dependencies,
             dev_dependencies: resolved_dev_dependencies,
         });
@@ -381,7 +379,6 @@ impl PackageResolver {
         Ok(package)
     }
 
-    #[instrument]
     fn resolve_deps(
         &mut self,
         deps: &HashMap<String, ExtendedVersionReq>,
@@ -473,7 +470,6 @@ fn package_data_from_node_modules(
     Ok(pkgs)
 }
 
-#[instrument]
 fn merge_hashmaps<K: Hash + Eq + Clone + fmt::Debug, V: Clone + fmt::Debug>(
     maps: &[&HashMap<K, V>],
 ) -> HashMap<K, V> {
@@ -486,4 +482,34 @@ fn merge_hashmaps<K: Hash + Eq + Clone + fmt::Debug, V: Clone + fmt::Debug>(
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use test_log::test;
+    use tracing::info;
+
+    use super::*;
+
+    #[test]
+    fn test_package_json_data() -> Result<()> {
+        let package_json_data = PackageJsonData::from_folder(Path::new("./tests/workspace"))
+            .unwrap()
+            .unwrap();
+
+        info!("Package name: {}", &package_json_data.name);
+        info!("Package version: {:?}", &package_json_data.version);
+        info!(
+            "Package install path: {}",
+            &package_json_data.install_path.display()
+        );
+        info!("Package globset: {:?}", &package_json_data.workspaces_globs);
+
+        for workspace in package_json_data.get_workspaces()? {
+            info!("Found workspace: {}", workspace.name);
+            assert!(package_json_data.contains_workspace(&workspace.install_path)?);
+        }
+
+        Ok(())
+    }
 }
