@@ -600,7 +600,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "module-version-checker"
+name = "node-module-version-checker"
 version = "0.1.0"
 dependencies = [
  "clap",
