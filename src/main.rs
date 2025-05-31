@@ -1,19 +1,22 @@
 use clap::Parser;
 use color_eyre::eyre::{Result, eyre};
 use colored::*;
-use diff::DiffedPackage;
-use package::PackageJsonData;
+use diff::Differ;
 use ptree::{PrintConfig, Style as PStyle};
+use resolver::Resolver;
 use std::path::PathBuf;
-use tracing::info;
+use tracing::debug;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use workspace_resolver::WorkspaceResolver;
 
+mod dependency_resolver;
 mod diff;
 mod extended_version_req;
+mod node_modules;
 mod package;
-mod tree_impl;
-mod workspace_resolver;
+mod package_data;
+mod ptree_impl;
+mod resolver;
+mod workspace_data;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -27,10 +30,10 @@ struct Args {
 
 #[derive(Parser, Debug)]
 enum Commands {
-    /// Show dependency tree for a package
+    /// Show the dependency tree for a package
     Tree { packages: Vec<PathBuf> },
     /// Compare dependencies between two packages
-    Diff { first: PathBuf, second: PathBuf },
+    Diff { left: PathBuf, right: PathBuf },
 }
 
 fn install_tracing() {
@@ -57,66 +60,58 @@ fn main() -> Result<()> {
 
     match args.command {
         Commands::Tree { packages } => handle_tree_command(packages, config),
-        Commands::Diff { first, second } => handle_diff_command(first, second, config),
+        Commands::Diff {
+            left: first,
+            right: second,
+        } => handle_diff_command(first, second, config),
     }
 }
 
 fn handle_tree_command(packages: Vec<PathBuf>, config: PrintConfig) -> Result<()> {
-    let mut workspace_resolver = WorkspaceResolver::new(config.depth as usize);
+    let mut resolver = Resolver::new(config.depth as usize);
 
-    let packages_data = packages
-        .iter()
-        .map(|p| {
-            PackageJsonData::from_folder(p)
-                .and_then(|o| o.ok_or(eyre!("No package.json found at {}", p.display())))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    for package_path in packages {
+        let package = resolver.resolve(&package_path)?;
 
-    for package_data in packages_data {
-        let mut package_resolver = workspace_resolver.get_package_resolver(&package_data)?;
-        let root_package = package_resolver.resolve_root_package(package_data.clone())?;
-
-        if package_data.is_workspace_root() {
+        debug!("Printing dependency tree for: {}", package.name);
+        if package.data.is_workspace_root() {
             println!("{}", "[WORKSPACE ROOT]".blue());
         }
 
-        ptree::print_tree_with(&root_package, &config).expect("Unable to print dependency tree");
-        println!("\n");
+        package
+            .print_tree(&config)
+            .expect("Unable to print dependency tree");
+        println!("");
 
-        for workspace in package_data.get_workspaces()? {
-            let mut package_resolver = workspace_resolver.get_package_resolver(&workspace)?;
-            let workspace_package = package_resolver.resolve_root_package(workspace)?;
-            ptree::print_tree_with(&workspace_package, &config)
-                .expect("Unable to print dependency tree");
-            println!("\n");
+        if let Some(workspace_data) = package.data.workspace_data.clone() {
+            for workspace_package in
+                resolver.resolve_workspace_members(&package_path, &workspace_data)?
+            {
+                println!("{}", "[WORKSPACE MEMBER]".blue());
+                workspace_package
+                    .print_tree(&config)
+                    .expect("Unable to print dependency tree");
+                println!("");
+            }
         }
     }
 
     Ok(())
 }
 
-fn handle_diff_command(first: PathBuf, second: PathBuf, config: PrintConfig) -> Result<()> {
-    let mut workspace_resolver = WorkspaceResolver::new(config.depth as usize);
+fn handle_diff_command(left: PathBuf, right: PathBuf, config: PrintConfig) -> Result<()> {
+    // let mut workspace_resolver = WorkspaceResolver::new(config.depth as usize);
+    let mut resolver = Resolver::new(config.depth as usize);
 
-    let first_package_data = PackageJsonData::from_folder(&first)?
-        .ok_or(eyre!("No package.json found at {}", first.display()))?;
-    let second_package_data = PackageJsonData::from_folder(&second)?
-        .ok_or(eyre!("No package.json found at {}", second.display()))?;
+    let left_package = resolver.resolve(&left)?;
+    let right_package = resolver.resolve(&right)?;
 
-    let mut first_package_resolver =
-        workspace_resolver.get_package_resolver(&first_package_data)?;
-    let mut second_package_resolver =
-        workspace_resolver.get_package_resolver(&second_package_data)?;
+    let (_differ, diff) = Differ::diff(left_package.clone(), right_package.clone());
 
-    let first_package = first_package_resolver.resolve_root_package(first_package_data)?;
-    let second_package = second_package_resolver.resolve_root_package(second_package_data)?;
+    let diff = diff.ok_or(eyre!("Unable to diff packages"))?;
 
-    info!("Diffing packages");
-    let diff = DiffedPackage::from(first_package, second_package)
-        .ok_or(eyre!("Unable to diff packages"))?;
-
-    info!("Printing dependency tree");
-    ptree::print_tree_with(&diff, &config).expect("Unable to print dependency tree");
+    diff.print_tree(&config)
+        .expect("Unable to print dependency tree");
 
     Ok(())
 }

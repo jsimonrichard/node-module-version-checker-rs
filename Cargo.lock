@@ -608,6 +608,7 @@ dependencies = [
  "colored",
  "glob",
  "globset",
+ "lazy_static 1.5.0",
  "ptree",
  "semver",
  "serde",

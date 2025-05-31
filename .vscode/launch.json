@@ -7,7 +7,7 @@
     {
       "type": "lldb",
       "request": "launch",
-      "name": "Debug executable 'mvc'",
+      "name": "Debug executable 'mvc' with single package",
       "cargo": {
         "args": [
           "build",
@@ -19,7 +19,31 @@
           "kind": "bin"
         }
       },
-      "args": ["--dir", "tests/react-vite"],
+      "args": ["tree", "tests/react-vite"],
+      "env": {
+        "RUST_LOG": "debug"
+      },
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug executable 'mvc' with workspace",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=mvc",
+          "--package=module-version-checker"
+        ],
+        "filter": {
+          "name": "mvc",
+          "kind": "bin"
+        }
+      },
+      "args": ["tree", "tests/workspace"],
+      "env": {
+        "RUST_LOG": "debug"
+      },
       "cwd": "${workspaceFolder}"
     },
     {
