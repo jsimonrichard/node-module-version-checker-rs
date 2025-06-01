@@ -7,15 +7,15 @@
     {
       "type": "lldb",
       "request": "launch",
-      "name": "Debug executable 'mvc' with single package",
+      "name": "Debug executable 'nmvc' with single package",
       "cargo": {
         "args": [
           "build",
-          "--bin=mvc",
-          "--package=module-version-checker"
+          "--bin=nmvc",
+          "--package=node-module-version-checker"
         ],
         "filter": {
-          "name": "mvc",
+          "name": "nmvc",
           "kind": "bin"
         }
       },
@@ -28,15 +28,15 @@
     {
       "type": "lldb",
       "request": "launch",
-      "name": "Debug executable 'mvc' with workspace",
+      "name": "Debug executable 'nmvc' with workspace",
       "cargo": {
         "args": [
           "build",
-          "--bin=mvc",
-          "--package=module-version-checker"
+          "--bin=nmvc",
+          "--package=node-module-version-checker"
         ],
         "filter": {
-          "name": "mvc",
+          "name": "nmvc",
           "kind": "bin"
         }
       },
@@ -49,16 +49,58 @@
     {
       "type": "lldb",
       "request": "launch",
-      "name": "Debug unit tests in executable 'mvc'",
+      "name": "Debug executable 'nmvc' diff (react-vite)",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=nmvc",
+          "--package=node-module-version-checker"
+        ],
+        "filter": {
+          "name": "nmvc",
+          "kind": "bin"
+        }
+      },
+      "args": ["diff", "./tests/react-vite", "./tests/react-vite-2"],
+      "env": {
+        "RUST_LOG": "debug"
+      },
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug executable 'nmvc' diff with external local project",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=nmvc",
+          "--package=node-module-version-checker"
+        ],
+        "filter": {
+          "name": "nmvc",
+          "kind": "bin"
+        }
+      },
+      "args": ["diff", "../strapi-test", "../praxis-books-2/strapi"],
+      "env": {
+        "RUST_LOG": "debug"
+      },
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests in executable 'nmvc'",
       "cargo": {
         "args": [
           "test",
           "--no-run",
-          "--bin=mvc",
-          "--package=module-version-checker"
+          "--bin=nmvc",
+          "--package=node-module-version-checker"
         ],
         "filter": {
-          "name": "mvc",
+          "name": "nmvc",
           "kind": "bin"
         }
       },

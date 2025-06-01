@@ -158,7 +158,7 @@ impl Package {
 impl fmt::Display for Package {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let deduped_text = if *self.visited.borrow() {
-            " [DEDUPED]".yellow()
+            " [DEDUPED]".bright_black()
         } else {
             "".into()
         };

@@ -5,14 +5,14 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use colored::*;
-use ptree::PrintConfig;
-use semver::Version;
-
 use crate::{
     extended_version_req::ExtendedVersionReq,
     package::{Dependency, Package, PackageEntry, PackageKey},
 };
+use color_eyre::eyre::Result;
+use colored::*;
+use ptree::PrintConfig;
+use semver::Version;
 
 #[derive(Debug, Clone)]
 pub struct DiffedDependency {
@@ -239,7 +239,7 @@ impl DiffedPackage {
 impl fmt::Display for DiffedPackage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let deduped_str = if *self.visited.borrow() {
-            " [DEDUPED]".yellow().to_string()
+            " [DEDUPED]".bright_black()
         } else {
             "".into()
         };
@@ -267,14 +267,19 @@ impl fmt::Display for DiffedPackage {
 
 pub struct Differ {
     diffed_packages: RefCell<HashMap<ChangedPackageKey, Option<Rc<DiffedPackage>>>>,
+    diff_queue: RefCell<Vec<ChangedPackageKey>>,
     left: Rc<Package>,
     right: Rc<Package>,
 }
 
 impl Differ {
-    pub fn diff(left: Rc<Package>, right: Rc<Package>) -> (Rc<Self>, Option<Rc<DiffedPackage>>) {
+    pub fn diff(
+        left: Rc<Package>,
+        right: Rc<Package>,
+    ) -> Result<(Rc<Self>, Option<Rc<DiffedPackage>>)> {
         let self_ = Rc::new(Self {
             diffed_packages: RefCell::new(HashMap::new()),
+            diff_queue: RefCell::new(Vec::new()),
             left,
             right,
         });
@@ -283,7 +288,49 @@ impl Differ {
             .diff_packages(&self_.left, &self_.right)
             .and_then(|weak| weak.upgrade());
 
-        (self_, diffed_package)
+        self_.process_queue()?;
+
+        Ok((self_, diffed_package))
+    }
+
+    fn process_queue(self: &Rc<Self>) -> Result<()> {
+        loop {
+            // Make sure that diff_queue is not borrowed later in the loop
+            let key_opt = {
+                let mut queue = self.diff_queue.borrow_mut();
+                queue.pop()
+            };
+
+            let Some(key) = key_opt else {
+                break;
+            };
+
+            let left_pkg = self
+                .left
+                .resolver()
+                .expect("Left package is missing")
+                .get_package(&key.left)
+                .ok_or_else(|| {
+                    color_eyre::eyre::eyre!("Left package with key {} is missing", key)
+                })?;
+            let right_pkg = self
+                .right
+                .resolver()
+                .expect("Right package is missing")
+                .get_package(&key.right)
+                .ok_or_else(|| {
+                    color_eyre::eyre::eyre!("Right package with key {} is missing", key)
+                })?;
+
+            // keep the recursion going even though the data structure isn't recursive
+            self.diff_packages(&left_pkg, &right_pkg);
+
+            if !self.diffed_packages.borrow().get(&key).is_some() {
+                panic!("Diffed package with key {} is missing", key);
+            }
+        }
+
+        Ok(())
     }
 
     fn diff_packages(
@@ -303,19 +350,20 @@ impl Differ {
         let left = left.clone();
         let right = right.clone();
 
-        let diffed_package = {
-            let dependencies = self.diff_dependencies(left.dependencies, right.dependencies);
-            let dev_dependencies =
-                self.diff_dependencies(left.dev_dependencies, right.dev_dependencies);
+        let dependencies =
+            self.diff_dependencies(left.dependencies.clone(), right.dependencies.clone());
+        let dev_dependencies = self.diff_dependencies(
+            left.dev_dependencies.clone(),
+            right.dev_dependencies.clone(),
+        );
 
-            if dependencies.is_empty()
-                && dev_dependencies.is_empty()
-                && left.version == right.version
-                && left.name == right.name
-            {
-                return None;
-            }
-
+        let diffed_package = if dependencies.is_empty()
+            && dev_dependencies.is_empty()
+            && left.version == right.version
+            && left.name == right.name
+        {
+            None
+        } else {
             Some(DiffedPackage {
                 name: left.name,
                 version_left: left.version,
@@ -409,24 +457,9 @@ impl Differ {
     ) -> Option<ChangedPackageEntry> {
         match (left, right) {
             (PackageEntry::Resolved(left), PackageEntry::Resolved(right)) => {
-                let left_pkg = self
-                    .left
-                    .resolver()
-                    .expect("Left package is missing")
-                    .get_package(&left)?;
-                let right_pkg = self
-                    .right
-                    .resolver()
-                    .expect("Right package is missing")
-                    .get_package(&right)?;
-
-                // keep the recursion going even though the data structure isn't recursive
-                self.diff_packages(&left_pkg, &right_pkg)?;
-
-                Some(ChangedPackageEntry::Resolved(ChangedPackageKey {
-                    left: PackageKey::from(&*left_pkg),
-                    right: PackageKey::from(&*right_pkg),
-                }))
+                let key = ChangedPackageKey { left, right };
+                self.diff_queue.borrow_mut().push(key.clone());
+                Some(ChangedPackageEntry::Resolved(key))
             }
             (PackageEntry::Missing, PackageEntry::Missing) => Some(ChangedPackageEntry::Missing),
             (PackageEntry::Truncated, PackageEntry::Truncated) => {

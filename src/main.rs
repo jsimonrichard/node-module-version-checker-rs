@@ -106,7 +106,7 @@ fn handle_diff_command(left: PathBuf, right: PathBuf, config: PrintConfig) -> Re
     let left_package = resolver.resolve(&left)?;
     let right_package = resolver.resolve(&right)?;
 
-    let (_differ, diff) = Differ::diff(left_package.clone(), right_package.clone());
+    let (_differ, diff) = Differ::diff(left_package.clone(), right_package.clone())?;
 
     let diff = diff.ok_or(eyre!("Unable to diff packages"))?;
 
