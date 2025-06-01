@@ -1,2 +1,3 @@
 - [ ] Children are calculated breadth-first (includes "should-display" calculation) but actual print is depth-first, results in mis-use of `self.visited()` in `ptree_impl/diff.rs`
   - Eventual solution: make everything calculate into a non-dynamic data structure using breadth-first algorithm
+- Get versions in tree printed correctly
