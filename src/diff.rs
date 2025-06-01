@@ -92,9 +92,9 @@ impl fmt::Display for DiffedDependency {
                 version_req,
                 package,
             } => match package.satisfies(&version_req) {
-                Some(true) => package.to_string().green().to_string(),
-                Some(false) => package.to_string().red().to_string(),
-                None => package.to_string(),
+                Some(true) => package.version_str().green().to_string(),
+                Some(false) => package.version_str().red().to_string(),
+                None => package.version_str(),
             },
         };
 

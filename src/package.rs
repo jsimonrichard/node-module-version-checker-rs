@@ -112,7 +112,7 @@ impl PackageEntry {
         }
     }
 
-    fn version_str(&self) -> String {
+    pub fn version_str(&self) -> String {
         match self {
             Self::Resolved(package) => package.version_str(),
             Self::Missing => format!("{}", "[MISSING]".red()),

@@ -1,6 +1,7 @@
 use std::{borrow::Cow, cell::OnceCell, fmt, io, rc::Rc};
 
 use color_eyre::eyre::Result;
+use colored::*;
 use ptree::{Style, TreeItem};
 
 use crate::diff::{
@@ -36,11 +37,13 @@ impl DiffedDepWithPackage {
 
 impl fmt::Display for DiffedDepWithPackage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(package) = &self.package {
-            write!(f, "{}", package)
+        let deduped_str = if self.package.as_ref().map_or(false, |p| *p.visited.borrow()) {
+            " [DEDUPED]".bright_black()
         } else {
-            write!(f, "{}", self.dependency)
-        }
+            "".into()
+        };
+
+        write!(f, "{}{}", self.dependency, deduped_str)
     }
 }
 
