@@ -5,7 +5,6 @@ use diff::Differ;
 use ptree::{PrintConfig, Style as PStyle};
 use resolver::Resolver;
 use std::path::PathBuf;
-use tracing::debug;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod dependency_resolver;
@@ -73,7 +72,6 @@ fn handle_tree_command(packages: Vec<PathBuf>, config: PrintConfig) -> Result<()
     for package_path in packages {
         let package = resolver.resolve(&package_path)?;
 
-        debug!("Printing dependency tree for: {}", package.name);
         if package.data.is_workspace_root() {
             println!("{}", "[WORKSPACE ROOT]".blue());
         }

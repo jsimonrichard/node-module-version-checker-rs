@@ -82,6 +82,7 @@ impl Resolver {
     }
 
     pub fn resolve(&mut self, path: &Path) -> Result<Rc<Package>> {
+        debug!("Resolving package at {}", path.display());
         let workspace_root = self.search_workspace_root_from(path)?;
 
         if let Some(workspace_root) = workspace_root {

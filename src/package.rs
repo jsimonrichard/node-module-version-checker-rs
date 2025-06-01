@@ -7,6 +7,7 @@ use std::fmt::{self, Display, Formatter};
 use std::hash::Hash;
 use std::io;
 use std::rc::{Rc, Weak};
+use tracing::debug;
 
 use crate::dependency_resolver::DependencyResolver;
 use crate::extended_version_req::ExtendedVersionReq;
@@ -147,6 +148,7 @@ impl Package {
     }
 
     pub fn print_tree(&self, config: &PrintConfig) -> io::Result<()> {
+        debug!("Printing tree for {}", self);
         self.resolver()
             .expect("Dependency resolver is missing")
             .refresh_visited();

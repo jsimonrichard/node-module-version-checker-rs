@@ -1,7 +1,6 @@
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc};
 
 use color_eyre::eyre::{Result, eyre};
-use tracing::debug;
 
 use crate::{
     extended_version_req::ExtendedVersionReq,
@@ -70,11 +69,6 @@ impl DependencyResolver {
 
             let node_modules_path = install_path.join("node_modules");
             if node_modules_path.exists() {
-                debug!(
-                    "extending resolver for {} at {}",
-                    name,
-                    node_modules_path.display()
-                );
                 let sub_resolver = node_modules.create_child(install_path.clone())?;
 
                 resolved_dependencies = self.resolve_deps(&dependencies, &sub_resolver)?;
