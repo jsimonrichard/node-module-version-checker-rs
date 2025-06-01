@@ -7,7 +7,7 @@ use crate::diff::{
     ChangedPackageEntry, DiffedDependency, DiffedPackage, DiffedPackageAndVersionReq,
 };
 
-use super::{ChildOrDevDependencySeparator, ShouldDisplay, Visiting};
+use super::{ChildOrDevDependencySeparator, ShouldDisplay, Visiting, sorted_values};
 
 #[derive(Debug, Clone)]
 pub struct DiffedDepWithPackage {
@@ -143,7 +143,7 @@ impl DiffedPackage {
 
     fn get_children(&self) -> Cow<[ChildOrDevDependencySeparator<DiffedDepWithPackage>]> {
         let mut v: Vec<ChildOrDevDependencySeparator<DiffedDepWithPackage>> = self
-            .populate_children(self.dependencies.values().cloned())
+            .populate_children(sorted_values(&self.dependencies))
             .expect("Failed to populate children")
             .into_iter()
             .map(|r| ChildOrDevDependencySeparator::Child(r))
@@ -152,7 +152,7 @@ impl DiffedPackage {
         if !self.dev_dependencies.is_empty() {
             v.push(ChildOrDevDependencySeparator::DevDependencySeparator);
             v.extend(
-                self.populate_children(self.dev_dependencies.values().cloned())
+                self.populate_children(sorted_values(&self.dev_dependencies))
                     .expect("Failed to populate children")
                     .into_iter()
                     .map(|r| ChildOrDevDependencySeparator::Child(r)),

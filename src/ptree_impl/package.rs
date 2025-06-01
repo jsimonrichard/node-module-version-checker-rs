@@ -4,7 +4,7 @@ use std::{borrow::Cow, io, rc::Rc};
 
 use crate::package::{Dependency, Package, PackageEntry};
 
-use super::ChildOrDevDependencySeparator;
+use super::{ChildOrDevDependencySeparator, sorted_values};
 
 #[derive(Debug, Clone)]
 pub struct DepWithPackage {
@@ -70,7 +70,7 @@ impl TreeItem for Package {
         }
 
         let mut v: Vec<Self::Child> = self
-            .populate_children(self.dependencies.values().cloned())
+            .populate_children(sorted_values(&self.dependencies))
             .expect("Failed to populate children")
             .into_iter()
             .map(|d| ChildOrDevDependencySeparator::Child(d))

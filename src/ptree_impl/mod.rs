@@ -1,7 +1,7 @@
 mod diff;
 mod package;
 
-use std::{borrow::Cow, fmt, io};
+use std::{borrow::Cow, collections::HashMap, fmt, io};
 
 use colored::*;
 use ptree::{Style, TreeItem};
@@ -72,4 +72,13 @@ impl<C: TreeItem + Visiting> Visiting for ChildOrDevDependencySeparator<C> {
             Self::DevDependencySeparator => false,
         }
     }
+}
+
+pub fn sorted_values<K: Ord + Clone, V: Clone>(deps: &HashMap<K, V>) -> Vec<V> {
+    let mut values = deps
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect::<Vec<_>>();
+    values.sort_by_cached_key(|(k, _)| k.clone());
+    values.into_iter().map(|(_, v)| v).collect()
 }
