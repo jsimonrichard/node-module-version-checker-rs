@@ -12,6 +12,12 @@ pub(crate) trait ShouldDisplay {
     }
 }
 
+pub(crate) trait Visiting {
+    fn visiting(&self) -> bool {
+        false
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ChildOrDevDependencySeparator<C: TreeItem> {
     Child(C),
@@ -55,6 +61,15 @@ impl<C: TreeItem + ShouldDisplay> ShouldDisplay for ChildOrDevDependencySeparato
         match self {
             Self::Child(child) => child.should_display(),
             Self::DevDependencySeparator => true,
+        }
+    }
+}
+
+impl<C: TreeItem + Visiting> Visiting for ChildOrDevDependencySeparator<C> {
+    fn visiting(&self) -> bool {
+        match self {
+            Self::Child(child) => child.visiting(),
+            Self::DevDependencySeparator => false,
         }
     }
 }

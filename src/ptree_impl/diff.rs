@@ -7,22 +7,30 @@ use crate::diff::{
     ChangedPackageEntry, DiffedDependency, DiffedPackage, DiffedPackageAndVersionReq,
 };
 
-use super::{ChildOrDevDependencySeparator, ShouldDisplay};
+use super::{ChildOrDevDependencySeparator, ShouldDisplay, Visiting};
 
 #[derive(Debug, Clone)]
 pub struct DiffedDepWithPackage {
     dependency: DiffedDependency,
     package: Option<Rc<DiffedPackage>>,
     children: OnceCell<Vec<ChildOrDevDependencySeparator<DiffedDepWithPackage>>>,
-    _should_display: OnceCell<bool>,
 }
 
 impl DiffedDepWithPackage {
     fn get_children(&self) -> Cow<[ChildOrDevDependencySeparator<DiffedDepWithPackage>]> {
-        Cow::from(self.children.get_or_init(|| match &self.package {
-            Some(package) => package.get_children().to_vec(),
-            None => vec![],
-        }))
+        self.children
+            .get_or_init(|| match &self.package {
+                Some(package) => package.get_children().to_vec(),
+                None => vec![],
+            })
+            .into()
+    }
+
+    fn visited(&self) -> bool {
+        match &self.package {
+            Some(package) => *package.visited.borrow(),
+            None => false,
+        }
     }
 }
 
@@ -38,22 +46,47 @@ impl fmt::Display for DiffedDepWithPackage {
 
 impl ShouldDisplay for DiffedDepWithPackage {
     fn should_display(&self) -> bool {
-        *self
-            ._should_display
-            .get_or_init(|| match &self.dependency.package {
-                DiffedPackageAndVersionReq::Changed {
-                    package: ChangedPackageEntry::Resolved(key),
-                    ..
-                } => {
-                    key.left.name != key.right.name
-                        || key.left.version != key.right.version
-                        || match &self.package {
-                            Some(_) => self.get_children().iter().any(|c| c.should_display()),
-                            None => false,
+        match &self.dependency.package {
+            DiffedPackageAndVersionReq::Changed {
+                package: ChangedPackageEntry::Resolved(key),
+                ..
+            } => {
+                key.left.name != key.right.name
+                    || key.left.version != key.right.version
+                    || match &self.package {
+                        Some(package) => {
+                            if self.visited() {
+                                return false;
+                            }
+
+                            // Mark the package as visited to avoid infinite recursion
+                            *package.visiting.borrow_mut() = true;
+
+                            let res = self
+                                .get_children()
+                                .iter()
+                                .filter(|c| !c.visiting())
+                                .any(|c| c.should_display());
+
+                            // Reset the visited flag
+                            *package.visiting.borrow_mut() = false;
+
+                            res
                         }
-                }
-                _ => true,
-            })
+                        None => false,
+                    }
+            }
+            _ => true,
+        }
+    }
+}
+
+impl Visiting for DiffedDepWithPackage {
+    fn visiting(&self) -> bool {
+        match &self.package {
+            Some(package) => *package.visiting.borrow(),
+            None => false,
+        }
     }
 }
 
@@ -73,8 +106,11 @@ impl TreeItem for DiffedDepWithPackage {
             }
         }
 
-        let children = self.get_children();
-        children
+        self.get_children()
+            .into_iter()
+            .cloned()
+            .filter(|c| c.should_display())
+            .collect()
     }
 }
 
@@ -100,7 +136,6 @@ impl DiffedPackage {
                     dependency: d.clone(),
                     package,
                     children: OnceCell::new(),
-                    _should_display: OnceCell::new(),
                 })
             })
             .collect()
@@ -124,7 +159,7 @@ impl DiffedPackage {
             );
         }
 
-        v.into_iter().filter(|c| c.should_display()).collect()
+        v.into()
     }
 }
 
@@ -143,5 +178,9 @@ impl TreeItem for DiffedPackage {
         }
 
         self.get_children()
+            .into_iter()
+            .cloned()
+            .filter(|c| c.should_display())
+            .collect()
     }
 }

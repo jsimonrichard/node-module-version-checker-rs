@@ -13,6 +13,7 @@ use color_eyre::eyre::Result;
 use colored::*;
 use ptree::PrintConfig;
 use semver::Version;
+use tracing::debug;
 
 #[derive(Debug, Clone)]
 pub struct DiffedDependency {
@@ -198,7 +199,10 @@ pub struct DiffedPackage {
     pub dependencies: HashMap<String, DiffedDependency>,
     pub dev_dependencies: HashMap<String, DiffedDependency>,
     pub(crate) differ: Weak<Differ>,
+    // Used to deduplicate packages during display
     pub(crate) visited: RefCell<bool>,
+    // Used to avoid infinite recursion
+    pub(crate) visiting: RefCell<bool>,
 }
 
 impl DiffedPackage {
@@ -227,6 +231,7 @@ impl DiffedPackage {
     }
 
     pub fn print_tree(&self, config: &PrintConfig) -> io::Result<()> {
+        debug!("Printing diff tree for {}", self);
         self.differ
             .upgrade()
             .expect("Differ is missing")
@@ -277,6 +282,7 @@ impl Differ {
         left: Rc<Package>,
         right: Rc<Package>,
     ) -> Result<(Rc<Self>, Option<Rc<DiffedPackage>>)> {
+        debug!("Diffing packages {} and {}", left.name, right.name);
         let self_ = Rc::new(Self {
             diffed_packages: RefCell::new(HashMap::new()),
             diff_queue: RefCell::new(Vec::new()),
@@ -371,6 +377,7 @@ impl Differ {
                 dependencies,
                 dev_dependencies,
                 visited: RefCell::new(false),
+                visiting: RefCell::new(false),
                 differ: Rc::downgrade(self),
             })
         };
