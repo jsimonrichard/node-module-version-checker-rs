@@ -1,6 +1,7 @@
 use color_eyre::eyre::Result;
+use colored::*;
 use ptree::{Style, TreeItem};
-use std::{borrow::Cow, io, rc::Rc};
+use std::{borrow::Cow, fmt, io, rc::Rc};
 
 use crate::package::{Dependency, Package, PackageEntry};
 
@@ -12,15 +13,23 @@ pub struct DepWithPackage {
     package: Option<Rc<Package>>,
 }
 
+impl fmt::Display for DepWithPackage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let deduped_str = if self.package.as_ref().map_or(false, |p| *p.visited.borrow()) {
+            " [DEDUPED]".bright_black()
+        } else {
+            "".into()
+        };
+
+        write!(f, "{}{}", self.dependency, deduped_str)
+    }
+}
+
 impl TreeItem for DepWithPackage {
     type Child = ChildOrDevDependencySeparator<DepWithPackage>;
 
     fn write_self<W: io::Write>(&self, f: &mut W, style: &Style) -> io::Result<()> {
-        if let Some(package) = &self.package {
-            write!(f, "{}", style.paint(package))
-        } else {
-            write!(f, "{}", style.paint(&self.dependency))
-        }
+        write!(f, "{}", style.paint(self))
     }
 
     fn children(&self) -> Cow<[Self::Child]> {
