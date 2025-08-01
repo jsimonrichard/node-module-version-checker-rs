@@ -11,7 +11,7 @@ cargo install --path .
 
 General:
 ```
-Usage: mvc [OPTIONS] <COMMAND>
+Usage: nmvc [OPTIONS] <COMMAND>
 
 Commands:
   tree  Show dependency tree for a package
@@ -28,7 +28,7 @@ Tree:
 ```
 Show the dependency tree for a package
 
-Usage: mvc tree [PACKAGES]...
+Usage: nmvc tree [PACKAGES]...
 
 Arguments:
   [PACKAGES]...
@@ -41,7 +41,7 @@ Diff:
 ```
 Compare dependencies between two packages
 
-Usage: mvc diff <LEFT> <RIGHT>
+Usage: nmvc diff <LEFT> <RIGHT>
 
 Arguments:
   <LEFT>
