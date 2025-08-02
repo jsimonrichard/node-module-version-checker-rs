@@ -7,16 +7,16 @@
     "app": {
       "name": "my-app",
       "dependencies": {
-        "@workspace/foo": "workspace:*",
+        "@my-workspace/foo": "workspace:*",
       },
     },
     "packages/foo": {
-      "name": "@workspace/foo",
+      "name": "@my-workspace/foo",
       "version": "0.0.1",
     },
   },
   "packages": {
-    "@workspace/foo": ["@workspace/foo@workspace:packages/foo"],
+    "@my-workspace/foo": ["@my-workspace/foo@workspace:packages/foo"],
 
     "my-app": ["my-app@workspace:app"],
   }
